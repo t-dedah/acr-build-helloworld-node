@@ -1,0 +1,78 @@
+on: [push]
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    
+    - uses: actions/checkout@master
+    
+    - uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Create ACR
+      id: create-acr
+      run: |
+        az acr create -n deepak21 -g deepak21b543-rg --location "East US" --sku Standard --admin-enabled
+        echo "::set-output name=acr_username::`az acr credential show -n deepak21 --query username | xargs`"
+        echo "::set-output name=acr_password::`az acr credential show -n deepak21 --query passwords[0].value | xargs`"
+        echo "::add-mask::`az acr credential show -n deepak21 --query passwords[0].value | xargs`"
+
+    - uses: azure/docker-login@v1
+      with:
+        login-server: deepak21.azurecr.io
+        username: ${{ steps.create-acr.outputs.acr_username }}
+        password: ${{ steps.create-acr.outputs.acr_password }}
+
+    - name: Build and push image to ACR
+      id: build-image
+      run: |
+        docker build "$GITHUB_WORKSPACE/" -f  "Dockerfile" -t deepak21.azurecr.io/test:2
+        docker push deepak21.azurecr.io/test:2
+    
+    - uses: azure/k8s-set-context@v1
+      id: login
+      with:
+         kubeconfig: ${{ secrets.aks_tdedah_kubeConfig }}
+    
+    - name: Create namespace
+      run: |
+        namespacePresent=`kubectl get namespace | grep tdedahd402 | wc -l`
+        if [ $namespacePresent -eq 0 ]
+        then
+            echo `kubectl create namespace tdedahd402`
+        fi
+
+    - uses: azure/k8s-create-secret@v1
+      with:
+        namespace: tdedahd402
+        container-registry-url: deepak21.azurecr.io
+        container-registry-username: ${{ steps.create-acr.outputs.acr_username }}
+        container-registry-password: ${{ steps.create-acr.outputs.acr_password }}
+        secret-name: tdedahdockerauth
+
+    - uses: azure/k8s-bake@v1
+      with:
+        renderEngine: 'helm'
+        helmChart: aks-helloworld
+        releaseName: 'aks-helm-release'
+        helm-version: 'latest' 
+        silent: 'false'
+        overrideFiles: |
+          
+        overrides: |
+          replicas:2
+          image.repository:deepak21.azurecr.io/test
+          image.tag:2
+          imagePullSecrets:
+            -name:tdedahdockerauth
+      id: bake
+
+    - uses: azure/k8s-deploy@v1
+      with:
+        namespace: tdedahd402
+        manifests: ${{ steps.bake.outputs.manifestsBundle }}
+        images: |
+          deepak21.azurecr.io/test:2
+        imagepullsecrets: |
+          tdedahdockerauth
